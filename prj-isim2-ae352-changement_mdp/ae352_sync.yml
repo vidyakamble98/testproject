@@ -1,0 +1,51 @@
+---
+- hosts: prtooln01
+  vars:
+    change_mdp_keepass_database_url: "{{ keepass_database_url }}"
+    change_mdp_keepass_database_password: "{{ keepass_database_password }}"
+  vars_files:
+    - vars/main.yml
+
+  tasks:
+    - name: Verify temp Keepass database exists
+      win_stat:
+        path: "D:\\AE352\\{{ change_mdp_keepass_database_temp_file_name }}"
+      run_once: true
+      delegate_to: prtooln01
+      register: verify_exists
+      failed_when: not verify_exists.stat.exists
+      when: change_mdp_keepass_database_temp_file_name is defined
+
+    - name: Sync to distant Keepass
+      win_command: powershell.exe -c "& 'C:\\Program Files\\KeePass-2.41\\KPScript.exe' -c:Sync '{{ keepass_database_url }}' -File:'D:\\AE352\\{{ change_mdp_keepass_database_temp_file_name }}' -pw:'{{ keepass_database_password }}'"
+      run_once: true
+      no_log: true
+      delegate_to: prtooln01
+      when: change_mdp_keepass_database_temp_file_name is defined
+
+    - name: Delete temp keepass file on RAS
+      win_file:
+        path: "D:\\AE352\\{{ change_mdp_keepass_database_temp_file_name }}"
+        state: absent
+      run_once: true
+      delegate_to: prtooln01
+      when: change_mdp_keepass_database_temp_file_name is defined
+
+    - name: Fail when change_mdp_keepass_database_temp_file_name is not defined
+      import_role:
+        name: rol-capg-mailstd
+      vars:
+        mailstd_type: REPORT
+        mailstd_smtpSubject: "[{{ ae | upper }}] Changement de mot de passe - Résultats d'exécution"
+        mailstd_smtpSecure: never
+        mailstd_smtpTo: "{{ use_case_report_email }}"
+        mailstd_smtpBody: |
+          Bonjour,
+          le cas d'usage n'a pas été exécuté, le(s) serveur(s) demandé(s) n'étant pas joignable(s).
+
+          Cordialement;
+          Equipe Automation.
+        mailstd_listKeyInputUsecase: Compte utilisateur (si applicable)
+        mailstd_listValInputUsecase: "{{ change_mdp_user_to_update if change_mdp_user_to_update is defined else 'N/A' }}"
+
+      when: change_mdp_keepass_database_temp_file_name is not defined

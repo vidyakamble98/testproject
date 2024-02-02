@@ -1,0 +1,95 @@
+---
+- name: Block change password
+  block:
+    - name: Generate password
+      set_fact:
+        new_password: "{{ lookup('password', '/dev/null length=6 chars=ascii_letters,digits,hexdigits,*#!?^>') +''+ lookup('password', '/dev/null length=2 chars=*#!?^>') +''+ lookup('password', '/dev/null length=3 chars=ascii_letters,digits,hexdigits,*#!?^>') +''+ lookup('password', '/dev/null length=2 chars=digits') +''+ lookup('password', '/dev/null length=3 chars=ascii_letters,*#!?^>') }}"
+      no_log: true
+
+    - name: Set facts for server/user
+      set_fact:
+        HOST: "{{ inventory_hostname }}"
+        UPDATED_USER: "{{ user_to_update }}"
+        OS_FAMILY: "{{ 'windows' if ansible_os_family == 'Windows' else 'unix' }}"
+        OS: "{{ 'windows' if ansible_os_family == 'Windows' else 'aix' if ansible_distribution == 'AIX' else 'linux' }}"
+        USER_PRESENT_ON_SERVER: "N/A"
+        PASSWORD_UPDATED_ON_KEEPASS: "N/A"
+        PASSWORD_UPDATED_ON_SERVER: "N/A"
+        STATUS_EXEC: "KO"
+
+    - name: Block test if user exists on server
+      block:
+        - name: Check user exists on server
+          win_user:
+            name: "{{ user_to_update }}"
+            state: query
+          register: query_user
+          failed_when: query_user.state == "absent"
+
+        - name: Set results for user
+          set_fact:
+            USER_PRESENT_ON_SERVER: "OK"
+
+        - name: Block keepass update
+          block:
+            - name: Update entry on keepass temp database on localhost
+              keepass:
+                keepass_database: "{{ change_mdp_keepass_database_temp_file_path }}"
+                keepass_password: "{{ change_mdp_keepass_database_password }}"
+                entry_title: "^{{ inventory_hostname.split('.')[0] }}$"
+                entry_username: "^{{ user_to_update }}$"
+                entry_password: "{{ new_password }}"
+                entry_group: "{{ change_mdp_keepass_base_group_windows }}"
+                entry_group_recursive: true
+                search_regex: true
+                search_flags: i
+              delegate_to: localhost
+              register: keepass_return
+              throttle: 1
+              vars:
+                ansible_python_interpreter: /usr/bin/python3 -E
+
+            - name: Set results keepass updated with new password OK
+              set_fact:
+                PASSWORD_UPDATED_ON_KEEPASS: "OK"
+
+            - name: Block server update
+              block:
+                - name: Modify password on server
+                  win_user:
+                    name: "{{ user_to_update }}"
+                    password: "{{ new_password }}"
+                  register: passwd_return
+
+                - name: Set results password updated on server OK
+                  set_fact:
+                    PASSWORD_UPDATED_ON_SERVER: "OK"
+
+                - name: Set results password updated on server OK
+                  set_fact:
+                    STATUS_EXEC: "OK"
+
+              rescue:
+                - name: Set results password updated on server KO
+                  set_fact:
+                    PASSWORD_UPDATED_ON_SERVER: "{{ 'KO: {}'.format(passwd_return.stderr | default('Error during password modification')) }}"
+
+          rescue:
+            - name: Set results keepass updated with new password KO
+              set_fact:
+                PASSWORD_UPDATED_ON_KEEPASS: "{{ 'KO: {}'.format(keepass_return.msg | default('Error updating temp KeepassDB')) }}"
+
+      rescue:
+        - name: Set results for user does not exists
+          set_fact:
+            USER_PRESENT_ON_SERVER: "KO: User does not exists on server"
+
+      always:
+        - name: Set results for server/user
+          set_fact:
+            ae352: "{{ ae352|default([]) + [{'UPDATED_USER': user_to_update, 'HOST': HOST, 'OS_FAMILY': OS_FAMILY, 'OS': OS, 'USER_PRESENT_ON_SERVER': USER_PRESENT_ON_SERVER, 'PASSWORD_UPDATED_ON_KEEPASS': PASSWORD_UPDATED_ON_KEEPASS, 'PASSWORD_UPDATED_ON_SERVER': PASSWORD_UPDATED_ON_SERVER, 'STATUS_EXEC': STATUS_EXEC}] }}"
+  when:
+    - user_to_update is defined
+    - user_to_update not in change_mdp_blacklist_of_users
+    - change_mdp_blacklist_of_contains not in user_to_update
+    - user_to_update != ''

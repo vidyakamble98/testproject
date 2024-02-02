@@ -1,0 +1,6 @@
+---
+- name: Check for required parameters
+  assert:
+    that:
+      - ansible_limit is defined
+    fail_msg: "Ansible limit not defined or required parameters are missing."

@@ -1,0 +1,24 @@
+---
+ae: ae352
+ae_description: password-management
+
+change_mdp_keepass_base_group_aix: UNIX/AIX/SERVEUR
+change_mdp_keepass_base_group_linux: UNIX/LINUX/SERVEUR
+change_mdp_keepass_base_group_windows: WINDOWS/SERVEUR
+
+change_mdp_max_days_expire_password: 15
+change_mdp_blacklist_of_users: ['postgres', 'oracle', 'webadm', 'webm', 'proftpd']
+change_mdp_blacklist_of_contains: '-ppu'
+
+change_mdp_keepass_database_url: "{{ keepass_database_url }}"
+change_mdp_keepass_database_password: "{{ keepass_database_password }}"
+
+report_csv_fields:
+      - HOST
+      - UPDATED_USER
+      - OS_FAMILY
+      - OS
+      - USER_PRESENT_ON_SERVER
+      - PASSWORD_UPDATED_ON_KEEPASS
+      - PASSWORD_UPDATED_ON_SERVER
+      - STATUS_EXEC

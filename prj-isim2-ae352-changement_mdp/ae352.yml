@@ -1,0 +1,173 @@
+---
+- hosts: all
+  gather_facts: false
+  tasks:
+    - name: Tunnel checks and mounts
+      import_role:
+        name: rol-isim2-socks5-tunnels
+      delegate_to: localhost
+      run_once: true
+
+- hosts: all
+  gather_facts: false
+  vars_files:
+    - vars/main.yml
+
+  tasks:
+    - name: Check parameters
+      include_tasks: "tasks/check_parameters.yml"
+      run_once: true
+
+    - name: Set AE352 facts for unreacheable
+      set_fact:
+        ae352:
+          - HOST: "{{ inventory_hostname }}"
+            UPDATED_USER: "{{ change_mdp_user_to_update if change_mdp_user_to_update is defined else 'N/A' }}"
+            OS_FAMILY: "N/A"
+            OS: "N/A"
+            USER_PRESENT_ON_SERVER: "N/A"
+            PASSWORD_UPDATED_ON_KEEPASS: "N/A"
+            PASSWORD_UPDATED_ON_SERVER: "N/A"
+            STATUS_EXEC: "KO: Server unreachable by Tower"
+      ignore_unreachable: true
+
+    - name: Setup facts
+      setup:
+        gather_timeout: 15
+        gather_subset:
+          - "!all"
+      async: 15
+      poll: 4
+
+    - name: Reset AE352 facts for reacheable
+      set_fact:
+        ae352: []
+
+    - name: Generate temp keepass file name
+      set_fact:
+        change_mdp_keepass_database_temp_file_name: "{{ '{}_keepassDB.kdbx'.format(ansible_date_time.iso8601_basic) }}"
+      run_once: true
+      delegate_to: localhost
+
+    - name: Set stating temp keepass file name for sync
+      set_stats:
+        data:
+          change_mdp_keepass_database_temp_file_name: "{{ change_mdp_keepass_database_temp_file_name }}"
+      run_once: true
+      delegate_to: localhost
+
+    - name: Setting path to temp keepass file name
+      set_fact:
+        change_mdp_keepass_database_temp_file_path: "/tmp/AE352/{{ change_mdp_keepass_database_temp_file_name }}"
+      run_once: true
+      delegate_to: localhost
+
+    - name: Retrieve Keepass database locally
+      get_url:
+        url: "{{ change_mdp_keepass_database_url }}"
+        dest: "{{ change_mdp_keepass_database_temp_file_path }}"
+      run_once: true
+      delegate_to: localhost
+
+    - name: Setting os type fact
+      set_fact:
+        host_os: "{{ 'windows' if ansible_os_family == 'Windows' else 'unix' }}"
+
+    - name: "Update password for user {{ change_mdp_user_to_update }} on host {{ inventory_hostname }} (semi auto)"
+      include_tasks: "tasks/change_mdp_{{ host_os }}.yml"
+      vars:
+        - user_to_update: "{{ change_mdp_user_to_update }}"
+      when: change_mdp_user_to_update is defined and change_mdp_user_to_update != ''
+
+    - name: Launch script to get expiring passwords (full auto)
+      script: "./files/get_expiring_passwords_{{ 'windows.ps1' if ansible_os_family == 'Windows' else 'unix.sh' }} -expire {{ change_mdp_max_days_expire_password | int }}"
+      become: true
+      register: list_change_mdp_user_to_update
+      when: change_mdp_user_to_update is not defined or change_mdp_user_to_update == ''
+
+    - name: "Update password for user {{ change_mdp_user_to_update }} on host {{ inventory_hostname }} (full auto)"
+      include_tasks: "tasks/change_mdp_{{ host_os }}.yml"
+      loop: "{{ list_change_mdp_user_to_update.stdout_lines | difference(['']) }}"
+      loop_control:
+        loop_var: user_to_update
+      when:
+        - change_mdp_user_to_update is not defined or change_mdp_user_to_update == ''
+        - list_change_mdp_user_to_update is defined
+        - list_change_mdp_user_to_update.stdout_lines | length > 0
+
+    - name: Copy temp Keepass database to Isolated Node host
+      win_copy:
+        src: "{{ change_mdp_keepass_database_temp_file_path }}"
+        dest: "D:\\AE352\\{{ change_mdp_keepass_database_temp_file_name }}"
+      run_once: true
+      delegate_to: prtooln01
+
+    - name: Delete temp keepass file
+      file:
+        path: "{{ change_mdp_keepass_database_temp_file_path }}"
+        state: absent
+      run_once: true
+      delegate_to: localhost
+
+    - name: Count OK/KO
+      block:
+        - name: Init counts by server
+          set_fact:
+            count_OK: 0
+            count_KO: 0
+
+        - name: Set counts OK/KO by server
+          set_fact:
+            count_OK: "{{ (count_OK | default(0)) | int + (item | string | regex_findall('STATUS_EXEC.{2,8}OK') | length | int)  }}"
+            count_KO: "{{ (count_KO | default(0)) | int + (item | string | regex_findall('STATUS_EXEC.{2,8}KO') | length | int)  }}"
+          loop: "{{ ae352 }}"
+
+        - name: Set counts total
+          set_fact:
+            count_OK_global: "{{ (count_OK_global | default(0)) | int + (hostvars[item]['count_OK']) | default(0) | int }}"
+            count_KO_global: "{{ (count_KO_global | default(0)) | int + (hostvars[item]['count_KO']) | default(0) | int }}"
+            list_KO_unreacheable: "{{ (ansible_play_hosts_all | difference(ansible_play_hosts)) | to_json }}"
+            list_ignored: "{{ (ansible_limit.split(',') | difference(ansible_play_hosts_all)) | to_json }}"
+          delegate_to: localhost
+          run_once: yes
+          loop: "{{ ansible_play_hosts_all }}"
+
+    - name: Block create report
+      block:
+        - name: Create report
+          include_tasks: "tasks/report_creator.yml"
+
+        - name: Send mail
+          import_role:
+            name: rol-capg-mailstd
+          vars:
+            mailstd_type: REPORT
+            mailstd_smtpSubject: "[{{ ae | upper }}] Changement de mot de passe - Résultats d'exécution"
+            mailstd_smtpSecure: never
+            mailstd_smtpTo: "{{ use_case_report_email }}"
+            mailstd_smtpBody: |
+              Bonjour,
+              le cas d'usage a été exécuté sur {{ ansible_play_hosts_all | length }} serveur(s) ({{ ((ansible_limit.split(',') | length)|int) - ((ansible_play_hosts_all | length)|int) }} serveur(s) ont été ignorés).
+              pour changer un total de {{ count_OK_global | int + count_KO_global | int }} mot(s) de passe.
+              Changements OK: {{ count_OK_global }}
+              Changements KO: {{ count_KO_global }}
+              le fichier résultat est accessible sur le partage: <a href="{{ report_url }}">Rapport d'exécution</a>
+
+              -----------------------------------------------------------------------
+              Liste des serveurs KO/Unreacheable: 
+              {{ list_KO_unreacheable }}
+              -----------------------------------------------------------------------
+              Liste des serveurs ignorés (non présent dans l'inventaire): 
+              {{ list_ignored }}
+              -----------------------------------------------------------------------
+
+              Cordialement;
+              Equipe Automation.
+            mailstd_listKeyInputUsecase: Compte utilisateur (si applicable)
+            mailstd_listValInputUsecase: "{{ change_mdp_user_to_update if change_mdp_user_to_update is defined else 'N/A' }}"
+
+      rescue:
+        - debug:
+            msg: "Report creation failed."
+          delegate_to: localhost
+          run_once: true
